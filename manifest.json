@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Shopify Finder \u2013 Meta Ads Library",
+  "version": "1.2.0",
+  "description": "Scans Meta Ads Library to reveal only Shopify-powered stores. Exports found URLs to CSV or Excel.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.facebook.com/ads/library/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/jszip.min.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

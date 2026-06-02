@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Shopify Finder</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #13131a;
+      --border: #1e1e2e;
+      --accent: #96bf48;
+      --accent-dim: rgba(150, 191, 72, 0.15);
+      --accent-glow: rgba(150, 191, 72, 0.35);
+      --danger: #ff4757;
+      --danger-dim: rgba(255, 71, 87, 0.15);
+      --text: #e8e8f0;
+      --text-muted: #6b6b80;
+      --text-dim: #9999aa;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      overflow: hidden;
+    }
+
+    .header {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(135deg, var(--surface) 0%, #0f0f18 100%);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .header::before {
+      content: '';
+      position: absolute;
+      top: -20px; right: -20px;
+      width: 80px; height: 80px;
+      border-radius: 50%;
+      background: var(--accent-glow);
+      filter: blur(30px);
+      pointer-events: none;
+    }
+
+    .logo-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+
+    .logo-icon {
+      width: 28px; height: 28px;
+      background: var(--accent);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .logo-text {
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      color: var(--text);
+    }
+
+    .logo-text span {
+      color: var(--accent);
+    }
+
+    .tagline {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding-left: 38px;
+    }
+
+    .body {
+      padding: 16px 20px;
+    }
+
+    /* Status card */
+    .status-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .status-label {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+    }
+
+    .status-badge {
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 20px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .status-badge.idle {
+      background: var(--border);
+      color: var(--text-muted);
+    }
+
+    .status-badge.running {
+      background: var(--accent-dim);
+      color: var(--accent);
+      animation: pulse-badge 1.5s ease-in-out infinite;
+    }
+
+    .status-badge.stopped {
+      background: var(--danger-dim);
+      color: var(--danger);
+    }
+
+    @keyframes pulse-badge {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
+    .stat-item {
+      background: var(--bg);
+      border-radius: 7px;
+      padding: 8px 6px;
+      text-align: center;
+    }
+
+    .stat-num {
+      font-family: 'Space Mono', monospace;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: 3px;
+    }
+
+    .stat-num.shopify { color: var(--accent); }
+    .stat-num.scanned { color: var(--text-dim); }
+    .stat-num.hidden { color: var(--text-muted); }
+
+    .stat-lbl {
+      font-size: 9px;
+      color: var(--text-muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-family: 'Space Mono', monospace;
+    }
+
+    /* Progress bar */
+    .progress-wrap {
+      margin-bottom: 14px;
+      display: none;
+    }
+
+    .progress-wrap.visible { display: block; }
+
+    .progress-label {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 5px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .progress-bar {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #c8ff6b);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s ease;
+      animation: shimmer 2s linear infinite;
+      background-size: 200% 100%;
+      background-image: linear-gradient(90deg, var(--accent) 0%, #c8ff6b 50%, var(--accent) 100%);
+    }
+
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* Controls */
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 10px 0;
+      border: none;
+      border-radius: 8px;
+      font-family: 'Syne', sans-serif;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .btn::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: white;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+
+    .btn:active::after { opacity: 0.08; }
+
+    .btn-start {
+      background: var(--accent);
+      color: #0a0a0f;
+    }
+
+    .btn-start:hover { filter: brightness(1.1); transform: translateY(-1px); }
+    .btn-start:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-stop {
+      background: var(--danger-dim);
+      color: var(--danger);
+      border: 1px solid rgba(255, 71, 87, 0.3);
+    }
+
+    .btn-stop:hover { background: rgba(255, 71, 87, 0.25); }
+    .btn-stop:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    /* Export section */
+    .export-section {
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+
+    .export-label {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .export-btns {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn-export {
+      flex: 1;
+      padding: 9px 0;
+      border-radius: 8px;
+      font-family: 'Syne', sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-dim);
+      letter-spacing: 0.03em;
+    }
+
+    .btn-export:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .btn-export:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    /* Results list */
+    .results-section {
+      margin-top: 14px;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+
+    .results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .results-label {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+    }
+
+    .btn-clear {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      text-decoration: underline;
+      padding: 0;
+      letter-spacing: 0.06em;
+    }
+
+    .btn-clear:hover { color: var(--danger); }
+
+    .results-list {
+      max-height: 140px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .result-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      margin-bottom: 3px;
+      background: var(--surface);
+      transition: background 0.1s;
+    }
+
+    .result-item:hover { background: var(--border); }
+
+    .result-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .result-url {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 20px 0;
+      color: var(--text-muted);
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.06em;
+    }
+
+    .empty-state .icon { font-size: 22px; margin-bottom: 6px; display: block; }
+
+    /* Footer */
+    .footer {
+      padding: 10px 20px;
+      border-top: 1px solid var(--border);
+      font-family: 'Space Mono', monospace;
+      font-size: 8px;
+      color: var(--text-muted);
+      letter-spacing: 0.06em;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .not-on-ads-library {
+      padding: 30px 20px;
+      text-align: center;
+    }
+
+    .not-on-ads-library .warn-icon {
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .not-on-ads-library p {
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+
+    .ads-lib-link {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      color: var(--accent);
+      text-decoration: none;
+      border: 1px solid var(--accent);
+      padding: 6px 12px;
+      border-radius: 6px;
+      display: inline-block;
+      letter-spacing: 0.06em;
+      transition: all 0.15s;
+    }
+
+    .ads-lib-link:hover { background: var(--accent-dim); }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="logo-row">
+      <div class="logo-icon">🛍</div>
+      <div class="logo-text">Shopify<span>Finder</span></div>
+    </div>
+    <div class="tagline">Meta Ads Library Scanner</div>
+  </div>
+
+  <div id="main-ui">
+    <div class="body">
+
+      <!-- Status Card -->
+      <div class="status-card">
+        <div class="status-row">
+          <span class="status-label">Status</span>
+          <span class="status-badge idle" id="status-badge">IDLE</span>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <div class="stat-num shopify" id="stat-shopify">0</div>
+            <div class="stat-lbl">Shopify</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-num scanned" id="stat-scanned">0</div>
+            <div class="stat-lbl">Scanned</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-num hidden" id="stat-hidden">0</div>
+            <div class="stat-lbl">Hidden</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Progress -->
+      <div class="progress-wrap" id="progress-wrap">
+        <div class="progress-label">
+          <span>Scanning ads…</span>
+          <span id="progress-text">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="controls">
+        <button class="btn btn-start" id="btn-start">▶ Start Scan</button>
+        <button class="btn btn-stop" id="btn-stop" disabled>■ Stop</button>
+      </div>
+
+      <!-- Export -->
+      <div class="export-section">
+        <div class="export-label">Export Results</div>
+        <div class="export-btns">
+          <button class="btn-export" id="btn-csv" disabled>⬇ CSV</button>
+          <button class="btn-export" id="btn-excel" disabled>⬇ Excel (XLSX)</button>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="results-section">
+        <div class="results-header">
+          <span class="results-label">Found Shopify Sites</span>
+          <button class="btn-clear" id="btn-clear">clear all</button>
+        </div>
+        <div class="results-list" id="results-list">
+          <div class="empty-state">
+            <span class="icon">🔍</span>
+            Run a scan to find Shopify stores
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="footer">
+      <span>v1.0.0</span>
+      <span id="footer-note">Open Meta Ads Library to begin</span>
+    </div>
+  </div>
+
+  <div id="not-on-page" style="display:none;">
+    <div class="not-on-ads-library">
+      <div class="warn-icon">📋</div>
+      <p>Please navigate to the <strong>Meta Ads Library</strong> to use this extension.</p>
+      <a class="ads-lib-link" href="https://www.facebook.com/ads/library/" target="_blank">Open Ads Library →</a>
+    </div>
+  </div>
+
+  <script src="lib/jszip.min.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
