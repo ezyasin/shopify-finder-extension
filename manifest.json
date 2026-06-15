@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Shopify Finder \u2013 Meta Ads Library",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "description": "Scans Meta Ads Library to reveal only Shopify-powered stores. Exports found URLs to CSV or Excel.",
   "permissions": [
     "activeTab",
@@ -39,7 +39,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "lib/jszip.min.js"
+        "lib/jszip.min.js",
+        "viewer.html"
       ],
       "matches": [
         "<all_urls>"

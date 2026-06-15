@@ -1,5 +1,4 @@
-// popup.js — Shopify Finder v3
-
+// popup.js — Shopify Finder v7
 'use strict';
 
 const $ = id => document.getElementById(id);
@@ -15,10 +14,14 @@ const btnStop      = $('btn-stop');
 const btnCsv       = $('btn-csv');
 const btnExcel     = $('btn-excel');
 const btnClear     = $('btn-clear');
+const btnViewer    = $('btn-viewer');
+const toggleScroll = $('toggle-scroll');
 const resultsList  = $('results-list');
 const footerNote   = $('footer-note');
 const mainUi       = $('main-ui');
 const notOnPage    = $('not-on-page');
+const scrollDone   = $('scroll-done');
+const adsCollected = $('ads-collected');
 
 let shopifyUrls = [];
 let isRunning   = false;
@@ -32,67 +35,91 @@ async function init() {
     notOnPage.style.display = 'block';
     return;
   }
-
   activeTabId = tab.id;
 
-  // Restore persisted data
-  const saved = await chrome.storage.local.get(['shopifyUrls', 'isRunning', 'stats']);
-  shopifyUrls = saved.shopifyUrls || [];
-  renderResults();
-  updateExportBtns();
-  if (saved.stats)     updateStats(saved.stats);
-  if (saved.isRunning) setRunning(true);
+  // Load ALL state from storage — this is the source of truth, not in-memory
+  syncFromStorage();
 
-  footerNote.textContent = tab.url.replace('https://www.facebook.com', '').split('?')[0];
+  toggleScroll.checked = true; // default on
+  chrome.storage.local.get(['autoScroll', 'isRunning'], r => {
+    if (r.autoScroll === false) toggleScroll.checked = false;
+    if (r.isRunning) setRunning(true);
+  });
+
+  footerNote.textContent = tab.url.replace('https://www.facebook.com','').split('?')[0];
 }
 
-// ── Message listener ──────────────────────────────────────────────────────────
-// Content script messages arrive at chrome.runtime directly (same extension).
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'SHOPIFY_FOUND') {
-    if (!shopifyUrls.includes(msg.url)) {
-      shopifyUrls.push(msg.url);
-      chrome.storage.local.set({ shopifyUrls });
-      renderResults();
-      updateExportBtns();
-    }
+// ── Sync all UI from storage (called on open and on storage changes) ──────────
+function syncFromStorage() {
+  chrome.storage.local.get(['shopifyUrls','stats','savedAds'], r => {
+    shopifyUrls = Array.isArray(r.shopifyUrls) ? r.shopifyUrls : [];
+    renderResults();
+    updateExportBtns();
+    if (r.stats) updateStats(r.stats);
+    updateAdsCollected(Array.isArray(r.savedAds) ? r.savedAds.length : 0);
+  });
+}
+
+// Listen to storage changes — if content script writes while popup is open, sync
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.shopifyUrls) {
+    shopifyUrls = changes.shopifyUrls.newValue || [];
+    renderResults();
+    updateExportBtns();
   }
-  if (msg.type === 'STATS_UPDATE') {
-    updateStats(msg.stats);
-    chrome.storage.local.set({ stats: msg.stats });
-    // Drive progress bar from scanned count (open-ended scan)
-    const n = msg.stats.scanned || 0;
-    if (n > 0 && isRunning) {
-      progressText.textContent = `${n} scanned`;
-      // Animate fill width based on shopify ratio
-      const ratio = n > 0 ? Math.min(1, (msg.stats.shopify || 0) / Math.max(n, 1)) : 0;
-      progressFill.style.width = Math.max(8, Math.round(ratio * 100)) + '%';
-    }
+  if (changes.savedAds) {
+    updateAdsCollected((changes.savedAds.newValue || []).length);
   }
 });
 
-// ── Button handlers ───────────────────────────────────────────────────────────
+// ── Messages from content script (live UI updates while popup is open) ────────
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'STATS_UPDATE') {
+    updateStats(msg.stats);
+    chrome.storage.local.set({ stats: msg.stats });
+    if (isRunning) {
+      const n = msg.stats.scanned || 0;
+      progressText.textContent = `${n} scanned`;
+      progressFill.style.width = Math.min(96, 8 + n * 2) + '%';
+    }
+  }
+  if (msg.type === 'AD_COLLECTED') {
+    updateAdsCollected(msg.total);
+  }
+  if (msg.type === 'SCROLL_DONE') {
+    scrollDone.style.display = 'inline';
+    setTimeout(() => { scrollDone.style.display = 'none'; }, 4000);
+  }
+  // SHOPIFY_FOUND is now handled via storage.onChanged above — no need here
+});
+
+// ── Scroll toggle ─────────────────────────────────────────────────────────────
+toggleScroll.addEventListener('change', () => {
+  const val = toggleScroll.checked;
+  chrome.storage.local.set({ autoScroll: val });
+  if (activeTabId) chrome.tabs.sendMessage(activeTabId, { type: 'SET_SCROLL', value: val }).catch(() => {});
+});
+
+// ── Buttons ───────────────────────────────────────────────────────────────────
 btnStart.addEventListener('click', async () => {
   if (!activeTabId) return;
+  const withScroll = toggleScroll.checked;
+  chrome.storage.local.set({ autoScroll: withScroll, isRunning: true });
   setRunning(true);
-  chrome.storage.local.set({ isRunning: true });
+  scrollDone.style.display = 'none';
 
-  // Send to content script; inject if not yet there
-  chrome.tabs.sendMessage(activeTabId, { type: 'START_SCAN' }, (resp) => {
-    if (chrome.runtime.lastError) {
-      chrome.scripting.executeScript(
-        { target: { tabId: activeTabId }, files: ['content.js'] },
-        () => {
-          if (chrome.runtime.lastError) {
-            console.error('Injection failed:', chrome.runtime.lastError.message);
-            setRunning(false);
-            return;
-          }
-          setTimeout(() => chrome.tabs.sendMessage(activeTabId, { type: 'START_SCAN' }), 300);
-        }
-      );
-    }
-  });
+  const sendStart = () => {
+    chrome.tabs.sendMessage(activeTabId, { type: 'START_SCAN', autoScroll: withScroll }, (resp) => {
+      if (chrome.runtime.lastError) {
+        chrome.scripting.executeScript({ target: { tabId: activeTabId }, files: ['content.js'] }, () => {
+          if (chrome.runtime.lastError) { setRunning(false); return; }
+          setTimeout(sendStart, 400);
+        });
+      }
+    });
+  };
+  sendStart();
 });
 
 btnStop.addEventListener('click', () => {
@@ -101,15 +128,23 @@ btnStop.addEventListener('click', () => {
   chrome.storage.local.set({ isRunning: false });
 });
 
+btnViewer.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') });
+});
+
+// Export from popup uses shopifyUrls (URLs only)
 btnCsv.addEventListener('click',   () => shopifyUrls.length && exportCSV());
 btnExcel.addEventListener('click', () => shopifyUrls.length && exportExcel());
 
 btnClear.addEventListener('click', () => {
-  shopifyUrls = [];
-  chrome.storage.local.remove(['shopifyUrls', 'stats']);
-  renderResults();
-  updateStats({ shopify: 0, scanned: 0, hidden: 0 });
-  updateExportBtns();
+  chrome.storage.local.remove(['shopifyUrls','stats','savedAds','isRunning'], () => {
+    shopifyUrls = [];
+    renderResults();
+    updateStats({ shopify:0, scanned:0, hidden:0 });
+    updateExportBtns();
+    updateAdsCollected(0);
+    setRunning(false);
+  });
 });
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -138,111 +173,101 @@ function updateStats(s) {
   statHidden.textContent  = s.hidden  || 0;
 }
 
+function updateAdsCollected(n) {
+  adsCollected.textContent   = n > 0 ? `${n} saved` : '';
+  adsCollected.style.display = n > 0 ? 'inline' : 'none';
+}
+
 function renderResults() {
+  const heading = document.querySelector('.results-label');
   if (!shopifyUrls.length) {
     resultsList.innerHTML = `<div class="empty-state"><span class="icon">🔍</span>Run a scan to find Shopify stores</div>`;
+    if (heading) heading.textContent = 'Found Shopify Sites';
     return;
   }
+  if (heading) heading.textContent = `Found Shopify Sites (${shopifyUrls.length})`;
   resultsList.innerHTML = shopifyUrls.map(url => {
-    const display = url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '');
-    return `<div class="result-item" title="${url}"><div class="result-dot"></div><div class="result-url">${h(display)}</div></div>`;
+    const d = url.replace(/^https?:\/\/(www\.)?/,'').replace(/\/$/,'');
+    return `<div class="result-item" title="${url}"><div class="result-dot"></div><div class="result-url">${h(d)}</div></div>`;
   }).join('');
 }
 
 function updateExportBtns() {
-  const has = shopifyUrls.length > 0;
-  btnCsv.disabled   = !has;
-  btnExcel.disabled = !has;
+  btnCsv.disabled   = shopifyUrls.length === 0;
+  btnExcel.disabled = shopifyUrls.length === 0;
 }
 
-const h = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const h  = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const xe = s => h(s).replace(/'/g,'&apos;');
 
-// ── CSV export ────────────────────────────────────────────────────────────────
+// ── CSV export (uses savedAds for rich data, falls back to shopifyUrls) ──────
 function exportCSV() {
   const date = new Date().toISOString().split('T')[0];
-  const rows = [
-    ['#','URL','Domain','Scan Date'],
-    ...shopifyUrls.map((url, i) => [
-      i + 1, url,
-      url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0],
-      date
-    ])
-  ];
-  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
-  download(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}), `shopify-stores-${date}.csv`);
+  chrome.storage.local.get(['savedAds'], (r) => {
+    const savedAds = Array.isArray(r.savedAds) ? r.savedAds : [];
+    let rows;
+    if (savedAds.length > 0) {
+      const cols = ['#','Advertiser','Domain','Library Code','Ad Text','Images','Videos','Saved At','Store URL'];
+      rows = [cols, ...savedAds.map((ad,i) => [
+        i+1, ad.advertiserName||'',
+        (ad.shopifyUrl||'').replace(/^https?:\/\/(www\.)?/,'').split('/')[0],
+        ad.libraryCode||'',
+        (ad.adText||'').replace(/\n/g,' ').substring(0,400),
+        (ad.images||[]).join(' | '), (ad.videos||[]).join(' | '),
+        ad.scrapedAt ? new Date(ad.scrapedAt).toLocaleString() : '',
+        ad.shopifyUrl||''
+      ])];
+    } else {
+      rows = [['#','URL','Domain','Scan Date'],
+        ...shopifyUrls.map((url,i) => [i+1, url, url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0], date])];
+    }
+    const csv = rows.map(r => r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    dl(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}), `shopify-stores-${date}.csv`);
+  });
 }
 
 // ── Excel export ──────────────────────────────────────────────────────────────
 function exportExcel() {
   if (typeof JSZip === 'undefined') { exportCSV(); return; }
-
   const date = new Date().toISOString().split('T')[0];
-  const rows = [
-    ['#','URL','Domain','Scan Date'],
-    ...shopifyUrls.map((url, i) => [
-      i+1, url,
-      url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0],
-      date
-    ])
-  ];
-
-  const sheetRows = rows.map((row, ri) =>
-    `<row r="${ri+1}">${row.map((val, ci) => {
-      const ref = `${String.fromCharCode(65+ci)}${ri+1}`;
-      return typeof val === 'number'
-        ? `<c r="${ref}"><v>${val}</v></c>`
-        : `<c r="${ref}" t="inlineStr"><is><t>${xe(String(val))}</t></is></c>`;
-    }).join('')}</row>`
-  ).join('');
-
-  const ns   = 'http://schemas.openxmlformats.org/';
-  const nsss = ns + 'spreadsheetml/2006/main';
-  const nsr  = ns + 'officeDocument/2006/relationships';
-  const nspk = 'http://schemas.openxmlformats.org/package/2006/';
-
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="${nspk}content-types">
-  <Default Extension="rels" ContentType="${nspk}relationships+xml"/>
-  <Default Extension="xml"  ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-</Types>`);
-
-  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="${nspk}relationships">
-  <Relationship Id="rId1" Type="${nsr}/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`);
-
-  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="${nsss}" xmlns:r="${nsr}">
-  <sheets><sheet name="Shopify Stores" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`);
-
-  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="${nspk}relationships">
-  <Relationship Id="rId1" Type="${nsr}/worksheet" Target="worksheets/sheet1.xml"/>
-</Relationships>`);
-
-  zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="${nsss}"><sheetData>${sheetRows}</sheetData></worksheet>`);
-
-  zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-    .then(blob => download(blob, `shopify-stores-${date}.xlsx`))
-    .catch(() => exportCSV());
-}
-
-function download(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  chrome.downloads.download({ url, filename, saveAs: true }, () => {
-    if (chrome.runtime.lastError) console.error(chrome.runtime.lastError);
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  chrome.storage.local.get(['savedAds'], (r) => {
+    const savedAds = Array.isArray(r.savedAds) ? r.savedAds : [];
+    let rows;
+    if (savedAds.length > 0) {
+      rows = [
+        ['#','Advertiser','Domain','Library Code','Ad Text','Images','Videos','Saved At','Store URL'],
+        ...savedAds.map((ad,i) => [
+          i+1, ad.advertiserName||'',
+          (ad.shopifyUrl||'').replace(/^https?:\/\/(www\.)?/,'').split('/')[0],
+          ad.libraryCode||'', (ad.adText||'').substring(0,400),
+          (ad.images||[]).join(' | '), (ad.videos||[]).join(' | '),
+          ad.scrapedAt ? new Date(ad.scrapedAt).toLocaleString() : '',
+          ad.shopifyUrl||''
+        ])
+      ];
+    } else {
+      rows = [['#','URL','Domain','Scan Date'],
+        ...shopifyUrls.map((url,i) => [i+1, url, url.replace(/^https?:\/\/(www\.)?/,'').split('/')[0], date])];
+    }
+    const sheetRows = rows.map((r,ri) => `<row r="${ri+1}">${r.map((v,ci)=>{
+      const ref=String.fromCharCode(65+ci)+(ri+1);
+      return typeof v==='number'?`<c r="${ref}"><v>${v}</v></c>`:`<c r="${ref}" t="inlineStr"><is><t>${xe(String(v))}</t></is></c>`;
+    }).join('')}</row>`).join('');
+    const ns='http://schemas.openxmlformats.org/';
+    const zip=new JSZip();
+    zip.file('[Content_Types].xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="${ns}package/2006/content-types"><Default Extension="rels" ContentType="${ns}package/2006/relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+    zip.file('_rels/.rels',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${ns}package/2006/relationships"><Relationship Id="rId1" Type="${ns}officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="${ns}spreadsheetml/2006/main" xmlns:r="${ns}officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${ns}package/2006/relationships"><Relationship Id="rId1" Type="${ns}officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="${ns}spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`);
+    zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})
+       .then(blob=>dl(blob,`shopify-stores-${date}.xlsx`));
   });
 }
 
-function xe(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-          .replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+function dl(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  chrome.downloads.download({ url, filename, saveAs: true }, () => setTimeout(()=>URL.revokeObjectURL(url),10000));
 }
 
 init();

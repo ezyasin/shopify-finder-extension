@@ -443,6 +443,84 @@
     }
 
     .ads-lib-link:hover { background: var(--accent-dim); }
+
+    /* ── Scroll toggle row ── */
+    .scroll-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 9px 13px;
+      margin-bottom: 10px;
+    }
+    .toggle-label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-dim);
+      letter-spacing: .02em;
+      cursor: pointer;
+    }
+    .toggle-icon { font-size: 13px; }
+    .toggle-hint {
+      font-size: 9px;
+      color: var(--text-muted);
+      font-weight: 400;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: .04em;
+    }
+    /* Toggle switch */
+    .switch { position: relative; display: inline-block; width: 34px; height: 19px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: var(--border); border-radius: 19px; transition: .2s;
+    }
+    .slider::before {
+      content: ''; position: absolute;
+      width: 13px; height: 13px; border-radius: 50%;
+      background: var(--text-muted); bottom: 3px; left: 3px; transition: .2s;
+    }
+    input:checked + .slider { background: var(--accent); }
+    input:checked + .slider::before { background: #0a0a0f; transform: translateX(15px); }
+    .scroll-done-badge {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px; font-weight: 700;
+      background: var(--accent-dim); color: var(--accent);
+      padding: 2px 7px; border-radius: 10px; letter-spacing: .06em;
+    }
+
+    /* ── Viewer button ── */
+    .btn-viewer-row {
+      width: 100%; display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px;
+      background: linear-gradient(135deg, var(--surface) 0%, #0f0f1a 100%);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      cursor: pointer;
+      font-family: 'Syne', sans-serif;
+      font-size: 12px; font-weight: 700;
+      color: var(--text-dim);
+      letter-spacing: .02em;
+      margin-bottom: 14px;
+      transition: .15s;
+    }
+    .btn-viewer-row:hover {
+      border-color: var(--accent); color: var(--accent);
+      background: var(--accent-dim);
+    }
+    .viewer-arrow { margin-left: auto; opacity: .5; }
+    .btn-viewer-row:hover .viewer-arrow { opacity: 1; }
+    .ads-badge {
+      font-family: 'Space Mono', monospace;
+      font-size: 9px; font-weight: 700;
+      background: var(--accent); color: #0a0a0f;
+      padding: 2px 8px; border-radius: 10px; letter-spacing: .04em;
+    }
   </style>
 </head>
 <body>
@@ -491,15 +569,39 @@
         </div>
       </div>
 
+      <!-- Auto-scroll toggle -->
+      <div class="scroll-toggle-row">
+        <label class="toggle-label" for="toggle-scroll">
+          <span class="toggle-icon">↕</span>
+          Auto-scroll
+          <span class="toggle-hint">scans while scrolling</span>
+        </label>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label class="switch">
+            <input type="checkbox" id="toggle-scroll" checked/>
+            <span class="slider"></span>
+          </label>
+          <span id="scroll-done" class="scroll-done-badge" style="display:none">✓ End</span>
+        </div>
+      </div>
+
       <!-- Controls -->
       <div class="controls">
         <button class="btn btn-start" id="btn-start">▶ Start Scan</button>
         <button class="btn btn-stop" id="btn-stop" disabled>■ Stop</button>
       </div>
 
+      <!-- Viewer button -->
+      <button class="btn-viewer-row" id="btn-viewer">
+        <span>🖼</span>
+        <span>Open Ad Viewer</span>
+        <span id="ads-collected" class="ads-badge" style="display:none">0</span>
+        <span class="viewer-arrow">→</span>
+      </button>
+
       <!-- Export -->
       <div class="export-section">
-        <div class="export-label">Export Results</div>
+        <div class="export-label">Export Data</div>
         <div class="export-btns">
           <button class="btn-export" id="btn-csv" disabled>⬇ CSV</button>
           <button class="btn-export" id="btn-excel" disabled>⬇ Excel (XLSX)</button>
@@ -523,7 +625,7 @@
     </div>
 
     <div class="footer">
-      <span>v1.0.0</span>
+      <span>v1.2.0</span>
       <span id="footer-note">Open Meta Ads Library to begin</span>
     </div>
   </div>

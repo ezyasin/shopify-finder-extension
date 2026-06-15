@@ -1,49 +1,98 @@
-// content.js — Shopify Finder v3
-// Strategy: scan ALL links on the page, find external ones, dedupe by domain,
-// check each domain for Shopify via background.js, then style parent containers.
-// This approach is DOM-structure-independent and works regardless of FB's class names.
-
+// content.js — Shopify Finder v7
+// KEY FIX: content script now writes shopifyUrls AND savedAds directly to storage
+// so data is never lost when popup is closed.
 (function () {
   'use strict';
-
   if (window.__sfLoaded) return;
   window.__sfLoaded = true;
 
-  // ── State ────────────────────────────────────────────────────────────────────
-  let isRunning  = false;
-  let observer   = null;
-  let scanTimer  = null;
-  let processing = false;
+  // ── State ─────────────────────────────────────────────────────────────────────
+  let isRunning        = false;
+  let autoScroll       = true;
+  let observer         = null;
+  let scanTimer        = null;
+  let scrollTimer      = null;
+  let processing       = false;
+  let scrollStuckCount = 0;
+  let lastScrollHeight = 0;
 
-  const stats          = { shopify: 0, scanned: 0, hidden: 0 };
-  const checkedDomains = new Map();   // domain → true | false
-  const processedLinks = new WeakSet(); // <a> elements already processed
+  const stats             = { shopify: 0, scanned: 0, hidden: 0 };
+  const checkedDomains    = new Map();  // domain → true|false
+  const processedCardKeys = new Set();  // dedup key for cards already saved
 
-  // ── Messaging ─────────────────────────────────────────────────────────────────
+  // ── Messages ───────────────────────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg.type === 'START_SCAN') { startScan(); sendResponse({ ok: true }); return true; }
-    if (msg.type === 'STOP_SCAN')  { stopScan();  sendResponse({ ok: true }); return true; }
+    if (msg.type === 'START_SCAN') {
+      startScan(msg.autoScroll !== false);
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg.type === 'STOP_SCAN') {
+      stopScan();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg.type === 'SET_SCROLL') {
+      autoScroll = !!msg.value;
+      if (autoScroll && isRunning) scheduleScroll(300);
+      sendResponse({ ok: true });
+      return true;
+    }
   });
 
-  // ── Lifecycle ─────────────────────────────────────────────────────────────────
-  function startScan() {
-    if (isRunning) return;
-    isRunning = true;
-    stats.shopify = stats.scanned = stats.hidden = 0;
+  // ── Lifecycle ──────────────────────────────────────────────────────────────────
+  function startScan(withScroll) {
+    isRunning        = true;
+    autoScroll       = withScroll;
+    processing       = false;
+    scrollStuckCount = 0;
+    lastScrollHeight = document.documentElement.scrollHeight;
     restoreAll();
+    stats.shopify = stats.scanned = stats.hidden = 0;
     sendStats();
     startObserver();
-    scheduleScan(200);
+    scheduleScan(300);
+    if (autoScroll) scheduleScroll(1500);
   }
 
   function stopScan() {
-    isRunning = false;
+    isRunning  = false;
+    autoScroll = false;
+    processing = false;
     clearTimeout(scanTimer);
+    clearTimeout(scrollTimer);
     if (observer) { observer.disconnect(); observer = null; }
-    log('Scan stopped.');
   }
 
-  // ── Core scan ─────────────────────────────────────────────────────────────────
+  // ── Auto-scroll ────────────────────────────────────────────────────────────────
+  function scheduleScroll(delay) {
+    clearTimeout(scrollTimer);
+    if (!isRunning || !autoScroll) return;
+    scrollTimer = setTimeout(doScroll, delay);
+  }
+
+  function doScroll() {
+    if (!isRunning || !autoScroll) return;
+    const scrollH  = document.documentElement.scrollHeight;
+    const atBottom = window.scrollY + window.innerHeight >= scrollH - 300;
+    if (atBottom) {
+      if (scrollH === lastScrollHeight) scrollStuckCount++;
+      else { scrollStuckCount = 0; lastScrollHeight = scrollH; }
+      if (scrollStuckCount >= 5) {
+        autoScroll = false;
+        notify({ type: 'SCROLL_DONE' });
+        return;
+      }
+      scheduleScroll(2500);
+    } else {
+      scrollStuckCount = 0;
+      lastScrollHeight = scrollH;
+      window.scrollBy({ top: Math.max(400, window.innerHeight - 150), behavior: 'smooth' });
+      scheduleScroll(2000);
+    }
+  }
+
+  // ── Scan loop ──────────────────────────────────────────────────────────────────
   function scheduleScan(delay) {
     clearTimeout(scanTimer);
     scanTimer = setTimeout(runScan, delay);
@@ -52,199 +101,269 @@
   async function runScan() {
     if (!isRunning || processing) return;
     processing = true;
-
-    // Collect all new external links on the page right now
     const linkMap = collectExternalLinks();
-    log(`Found ${linkMap.size} unique external domains to process`);
+    log(`Scan: ${linkMap.size} domains`);
 
     for (const [domain, { url, anchors }] of linkMap) {
       if (!isRunning) break;
-
-      // Skip already checked domains — just apply the cached result visually
       if (checkedDomains.has(domain)) {
-        const cached = checkedDomains.get(domain);
-        anchors.forEach(a => {
-          if (!processedLinks.has(a)) {
-            processedLinks.add(a);
-            applyToAnchor(a, url, cached);
-          }
-        });
+        for (const a of anchors) applyToAnchor(a, url, checkedDomains.get(domain));
         continue;
       }
-
-      // Mark all these anchors as in-progress
-      anchors.forEach(a => processedLinks.add(a));
-
       stats.scanned++;
       sendStats();
 
-      // Instant check
       if (domain.endsWith('.myshopify.com')) {
         checkedDomains.set(domain, true);
-        anchors.forEach(a => applyToAnchor(a, url, true));
+        for (const a of anchors) applyToAnchor(a, url, true);
         stats.shopify++;
-        sendShopifyFound(`https://${domain}`);
+        await saveShopifyUrl(`https://${domain}`);
         sendStats();
         continue;
       }
 
-      // Ask background (CORS-free)
       let isShopify = false;
       try {
         const res = await chrome.runtime.sendMessage({ type: 'CHECK_SHOPIFY', url: `https://${domain}` });
         isShopify = !!(res && res.isShopify);
-      } catch (e) {
-        log('CHECK_SHOPIFY error:', e.message);
-      }
+      } catch (e) { log('CHECK_SHOPIFY err:', e.message); }
 
       checkedDomains.set(domain, isShopify);
-
       if (isShopify) {
         stats.shopify++;
-        sendShopifyFound(`https://${domain}`);
-        anchors.forEach(a => applyToAnchor(a, url, true));
+        await saveShopifyUrl(`https://${domain}`);
+        for (const a of anchors) applyToAnchor(a, url, true);
       } else {
         stats.hidden++;
-        anchors.forEach(a => applyToAnchor(a, url, false));
+        for (const a of anchors) applyToAnchor(a, url, false);
       }
-
       sendStats();
       await sleep(60);
     }
-
     processing = false;
   }
 
-  // ── Link collection ───────────────────────────────────────────────────────────
-  /**
-   * Returns Map<domain, { url, anchors: Set<Element> }>
-   * 
-   * Meta Ads Library wraps CTA links in one of these patterns:
-   *   1. <a href="https://l.facebook.com/l.php?u=ENCODED_URL&...">
-   *   2. <a href="https://www.facebook.com/ads/...">  ← internal, skip
-   *   3. Plain text domain shown in card (no link at all in some views)
-   *
-   * We decode FB redirect URLs and bucket by root domain.
-   */
+  // ── CRITICAL: Save shopify URL directly to storage (don't rely on popup) ──────
+  async function saveShopifyUrl(url) {
+    return new Promise(resolve => {
+      chrome.storage.local.get(['shopifyUrls'], (r) => {
+        if (chrome.runtime.lastError) { resolve(); return; }
+        const urls = Array.isArray(r.shopifyUrls) ? r.shopifyUrls : [];
+        if (urls.includes(url)) { resolve(); return; }
+        urls.push(url);
+        chrome.storage.local.set({ shopifyUrls: urls }, () => {
+          // Notify popup so it can update its UI if open
+          notify({ type: 'SHOPIFY_FOUND', url });
+          resolve();
+        });
+      });
+    });
+  }
+
+  // ── Link collection ────────────────────────────────────────────────────────────
   function collectExternalLinks() {
     const map = new Map();
-
-    const allAnchors = document.querySelectorAll('a[href]');
-    for (const a of allAnchors) {
-      const rawHref = a.getAttribute('href') || '';
-      const href    = a.href || '';
-
-      let url = decodeExternalUrl(href) || decodeExternalUrl(rawHref);
+    for (const a of document.querySelectorAll('a[href]')) {
+      const url = decodeExternalUrl(a.href) || decodeExternalUrl(a.getAttribute('href'));
       if (!url) continue;
-
       let domain;
-      try {
-        domain = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-      } catch { continue; }
-
+      try { domain = new URL(url).hostname.replace(/^www\./, '').toLowerCase(); }
+      catch { continue; }
       if (!domain || domain.length < 4) continue;
-
-      if (!map.has(domain)) {
-        map.set(domain, { url, anchors: new Set() });
-      }
+      if (!map.has(domain)) map.set(domain, { url, anchors: new Set() });
       map.get(domain).anchors.add(a);
     }
-
     return map;
   }
 
   function decodeExternalUrl(href) {
     if (!href) return null;
-
-    // Facebook redirect: l.facebook.com/l.php?u=<encoded>
     if (href.includes('l.facebook.com/l.php') || href.includes('/l.php?')) {
       try {
-        const params = new URL(href.startsWith('http') ? href : 'https://x.com' + href).searchParams;
-        const u = params.get('u');
+        const base = href.startsWith('http') ? href : 'https://x.com' + href;
+        const u = new URL(base).searchParams.get('u');
         if (u) return decodeURIComponent(u);
       } catch (_) {}
     }
-
-    // Direct external link
-    if (isExternal(href)) return href;
-
-    return null;
+    return isExternal(href) ? href : null;
   }
 
   function isExternal(url) {
     if (!url || !url.startsWith('http')) return false;
-    const BLOCKED = [
-      'facebook.com', 'fb.com', 'instagram.com', 'fbcdn.net',
-      'whatsapp.com', 'messenger.com', 'fb.me', 'facebookmail.com',
-      'about.fb.com', 'business.facebook.com'
-    ];
-    return !BLOCKED.some(b => url.includes(b));
+    return !['facebook.com','fb.com','instagram.com','fbcdn.net',
+             'whatsapp.com','messenger.com','fb.me','facebookmail.com'].some(b => url.includes(b));
   }
 
-  // ── Apply results to DOM ───────────────────────────────────────────────────────
-  /**
-   * Given an anchor element, walk up the DOM to find its ad card container,
-   * then hide or highlight it. The ad card is identified as the nearest
-   * ancestor that is a large, visually distinct block — we use a combination
-   * of offsetHeight threshold and depth cap.
-   */
+  // ── Apply result ───────────────────────────────────────────────────────────────
   function applyToAnchor(anchor, url, isShopify) {
-    const card = findCardContainer(anchor);
+    const card = findCardRoot(anchor);
     if (!card) return;
-
-    // Avoid double-processing the same card for different links inside it
-    if (card.getAttribute('data-sf-status') === 'shopify') return; // already confirmed Shopify
-    if (card.getAttribute('data-sf-status') === 'hidden' && isShopify) {
-      // Upgrade hidden → shopify (another link in this card is Shopify)
-      showCard(card, url);
-      return;
-    }
-    if (card.getAttribute('data-sf-status')) return; // already processed
-
-    if (isShopify) {
-      showCard(card, url);
-    } else {
-      hideCard(card);
-    }
+    const status = card.getAttribute('data-sf-status');
+    if (status === 'shopify') return;
+    if (status === 'hidden' && isShopify) { showCard(card); collectAd(card, url); return; }
+    if (status) return;
+    if (isShopify) { showCard(card); collectAd(card, url); }
+    else hideCard(card);
   }
 
-  /**
-   * Walk up from anchor, find the best "card" container.
-   * 
-   * Meta Ads Library wraps each ad in a div that:
-   *  - is at least ~300px tall
-   *  - has a border or background distinguishing it from siblings
-   *  - typically 3–8 levels above the <a> tag
-   * 
-   * We walk up until we find a div whose NEXT SIBLING is also a similar-sized div
-   * (i.e., we're at the list-item level, not the list-container level).
-   */
-  function findCardContainer(el) {
-    let current = el;
-    let best    = null;
-
-    for (let depth = 0; depth < 20; depth++) {
-      current = current.parentElement;
-      if (!current || current === document.body) break;
-
-      const h = current.offsetHeight;
-      const w = current.offsetWidth;
-      if (h < 200 || w < 200) continue;
-
-      // Check if siblings look like peer ad cards (indicating we're at card level)
-      const siblings = Array.from(current.parentElement?.children || [])
-        .filter(s => s !== current && s.offsetHeight > 200);
-
-      if (siblings.length >= 1) {
-        best = current;
-        // Keep walking up a little more to catch the full card wrapper
-        if (depth >= 4) break;
-      }
+  // ── Card root finder ───────────────────────────────────────────────────────────
+  function findCardRoot(el) {
+    let cur = el, best = null;
+    for (let d = 0; d < 25; d++) {
+      cur = cur?.parentElement;
+      if (!cur || cur === document.body) break;
+      if (cur.offsetHeight < 180 || cur.offsetWidth < 180) continue;
+      const parent = cur.parentElement;
+      if (!parent) continue;
+      const peers = [...parent.children].filter(c => c !== cur && c.offsetHeight > 180);
+      if (peers.length >= 1) { best = cur; if (d >= 3) break; }
     }
-
     return best;
   }
 
+  // ── Ad extraction ──────────────────────────────────────────────────────────────
+  function extractAdData(card, shopifyUrl) {
+    const ad = {
+      shopifyUrl,
+      advertiserName: '',
+      advertiserLogo: '',
+      adText:         '',
+      images:         [],
+      videos:         [],
+      libraryCode:    '',
+      scrapedAt:      new Date().toISOString(),
+    };
+
+    const text = card.innerText || '';
+
+    // Library code
+    const codeMatch = text.match(/\b(\d{13,16})\b/);
+    if (codeMatch) ad.libraryCode = codeMatch[1];
+
+    // Advertiser name — find "Sponsorlu/Sponsored" leaf, grab name from sibling
+    const SPONSOR_RE = /^(Sponsorlu|Sponsored|Patrocinado|Sponsorisé|Sponsert|Gesponsert)$/i;
+    for (const el of card.querySelectorAll('*')) {
+      const t = (el.innerText || '').trim();
+      if (!SPONSOR_RE.test(t) || el.children.length > 0) continue;
+      let probe = el.parentElement;
+      for (let i = 0; i < 7 && probe; i++) {
+        const prev = probe.previousElementSibling;
+        if (prev) {
+          const name = (prev.innerText || '').trim().split('\n')[0].trim();
+          if (name && name.length > 1 && name.length < 80) {
+            ad.advertiserName = name;
+            break;
+          }
+        }
+        probe = probe.parentElement;
+      }
+      // Avatar image near sponsor label
+      const wrap = el.closest('div');
+      if (wrap) {
+        for (const img of wrap.querySelectorAll('img')) {
+          if (img.src && !img.src.startsWith('data:') && img.offsetWidth > 20) {
+            ad.advertiserLogo = img.src;
+            break;
+          }
+        }
+      }
+      break;
+    }
+
+    // Ad body text — longest non-meta leaf
+    const META_RE = /^(Kütüphane|Library\s+Code|Sponsorlu|Sponsored|Platform|Reklam|See Ad|Özet|Summary|Bu reklam|This ad|\d{10,}|Aktif|Active|Tümünü|Shop Now|Learn More|Sign Up|Book Now)/i;
+    let longest = '';
+    for (const el of card.querySelectorAll('*')) {
+      if (el.children.length > 0) continue;
+      const t = (el.innerText || '').trim();
+      if (t.length > longest.length && !META_RE.test(t) && t.length > 15 && t.length < 600) {
+        longest = t;
+      }
+    }
+    ad.adText = longest;
+
+    // Images — content images only, skip avatars/icons, cap at 3
+    for (const img of card.querySelectorAll('img')) {
+      if (ad.images.length >= 3) break;
+      const src = img.src || img.getAttribute('data-src') || '';
+      if (!src || src.startsWith('data:') || src.includes('emoji')) continue;
+      const w = img.naturalWidth  || img.offsetWidth  || 0;
+      const h = img.naturalHeight || img.offsetHeight || 0;
+      if (w < 100 || h < 100) continue;
+      // Strip query params to reduce storage size
+      const clean = src.split('?')[0];
+      if (clean && !ad.images.includes(clean)) ad.images.push(clean);
+    }
+
+    // Videos + poster thumbnail
+    for (const vid of card.querySelectorAll('video')) {
+      if (ad.videos.length >= 2) break;
+      const src = vid.src || vid.currentSrc || vid.querySelector('source')?.src || '';
+      if (src) {
+        const clean = src.split('?')[0];
+        if (clean && !ad.videos.includes(clean)) ad.videos.push(clean);
+      }
+      if (vid.poster && ad.images.length < 3) {
+        const clean = vid.poster.split('?')[0];
+        if (clean && !ad.images.includes(clean)) ad.images.push(clean);
+      }
+    }
+
+    return ad;
+  }
+
+  // ── Collect and save ad to storage ────────────────────────────────────────────
+  function collectAd(card, url) {
+    const ad  = extractAdData(card, url);
+    const key = ad.libraryCode || url;
+    if (processedCardKeys.has(key)) return;
+    processedCardKeys.add(key);
+
+    log('Collected:', ad.advertiserName || '?', '| code:', ad.libraryCode || '-', '| imgs:', ad.images.length);
+
+    saveAd(ad);
+  }
+
+  function saveAd(ad, stripMedia = false) {
+    if (stripMedia) {
+      ad = { ...ad, images: [], videos: [], advertiserLogo: '' };
+    }
+
+    chrome.storage.local.get(['savedAds'], (r) => {
+      if (chrome.runtime.lastError) { log('Read err:', chrome.runtime.lastError.message); return; }
+
+      const existing = Array.isArray(r.savedAds) ? r.savedAds : [];
+
+      const exists = ad.libraryCode
+        ? existing.some(e => e.libraryCode === ad.libraryCode)
+        : existing.some(e =>
+            e.shopifyUrl === ad.shopifyUrl &&
+            e.adText === ad.adText &&
+            JSON.stringify(e.images || []) === JSON.stringify(ad.images || [])
+          );
+      if (exists) { log('Already in storage'); return; }
+
+      // Rolling cap at 500 ads
+      if (existing.length >= 500) existing.splice(0, existing.length - 499);
+      existing.push(ad);
+
+      chrome.storage.local.set({ savedAds: existing }, () => {
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || '';
+          log('Write err:', msg);
+          if (!stripMedia && (msg.includes('QUOTA') || msg.includes('quota') || msg.includes('exceeded'))) {
+            log('Quota hit — retrying without media');
+            saveAd(ad, true); // retry without images/videos
+          }
+          return;
+        }
+        log('Saved. Total in storage:', existing.length);
+        notify({ type: 'AD_COLLECTED', total: existing.length });
+      });
+    });
+  }
+
+  // ── Card styling ───────────────────────────────────────────────────────────────
   function hideCard(card) {
     card.setAttribute('data-sf-status', 'hidden');
     card.style.opacity    = '0.1';
@@ -252,50 +371,43 @@
     card.style.transition = 'opacity 0.2s, filter 0.2s';
   }
 
-  function showCard(card, url) {
+  function showCard(card) {
     card.setAttribute('data-sf-status', 'shopify');
     card.style.opacity      = '1';
     card.style.filter       = '';
     card.style.transition   = '';
     card.style.outline      = '2.5px solid #96bf48';
     card.style.borderRadius = '10px';
-    card.style.boxShadow    = '0 0 0 4px rgba(150,191,72,0.15)';
+    card.style.boxShadow    = '0 0 0 5px rgba(150,191,72,0.13)';
   }
 
   function restoreAll() {
     document.querySelectorAll('[data-sf-status]').forEach(el => {
       el.removeAttribute('data-sf-status');
-      el.style.opacity     = '';
-      el.style.filter      = '';
-      el.style.outline     = '';
-      el.style.boxShadow   = '';
-      el.style.transition  = '';
-      el.style.borderRadius = '';
+      ['opacity','filter','outline','boxShadow','transition','borderRadius'].forEach(p => el.style[p] = '');
     });
   }
 
-  // ── Observer (infinite scroll) ────────────────────────────────────────────────
+  // ── MutationObserver ───────────────────────────────────────────────────────────
   function startObserver() {
     if (observer) observer.disconnect();
-    observer = new MutationObserver(() => {
-      if (!isRunning) return;
-      // Debounce: wait for the DOM burst to settle
-      scheduleScan(800);
-    });
+    observer = new MutationObserver(() => { if (isRunning) scheduleScan(700); });
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  // ── Utils ─────────────────────────────────────────────────────────────────────
+  // ── Helpers ────────────────────────────────────────────────────────────────────
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const log   = (...a) => console.log('[SF]', ...a);
+  const log   = (...a) => console.log('[SF v7]', ...a);
 
   function sendStats() {
-    chrome.runtime.sendMessage({ type: 'STATS_UPDATE', stats: { ...stats } }).catch(() => {});
-  }
-  function sendShopifyFound(url) {
-    chrome.runtime.sendMessage({ type: 'SHOPIFY_FOUND', url }).catch(() => {});
+    notify({ type: 'STATS_UPDATE', stats: { ...stats } });
   }
 
-  log('v3 loaded');
-  chrome.runtime.sendMessage({ type: 'CONTENT_READY' }).catch(() => {});
+  // Fire-and-forget notify to popup (ok if popup is closed)
+  function notify(msg) {
+    chrome.runtime.sendMessage(msg).catch(() => {});
+  }
+
+  log('v7 loaded');
+  notify({ type: 'CONTENT_READY' });
 })();
