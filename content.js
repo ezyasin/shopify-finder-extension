@@ -285,31 +285,51 @@
     // Images — content images only, skip avatars/icons, cap at 3
     for (const img of card.querySelectorAll('img')) {
       if (ad.images.length >= 3) break;
-      const src = img.src || img.getAttribute('data-src') || '';
+      const src = firstUsableMediaUrl(img.currentSrc, img.src, img.getAttribute('data-src'), img.getAttribute('src'));
       if (!src || src.startsWith('data:') || src.includes('emoji')) continue;
       const w = img.naturalWidth  || img.offsetWidth  || 0;
       const h = img.naturalHeight || img.offsetHeight || 0;
       if (w < 100 || h < 100) continue;
-      // Strip query params to reduce storage size
-      const clean = src.split('?')[0];
-      if (clean && !ad.images.includes(clean)) ad.images.push(clean);
+      if (!ad.images.includes(src)) ad.images.push(src);
     }
 
     // Videos + poster thumbnail
     for (const vid of card.querySelectorAll('video')) {
       if (ad.videos.length >= 2) break;
-      const src = vid.src || vid.currentSrc || vid.querySelector('source')?.src || '';
+      const sourceUrls = [...vid.querySelectorAll('source')].flatMap(source => [
+        source.src,
+        source.getAttribute('src'),
+        source.getAttribute('data-src'),
+      ]);
+      const src = firstUsableMediaUrl(
+        vid.currentSrc,
+        vid.src,
+        vid.getAttribute('src'),
+        vid.getAttribute('data-src'),
+        ...sourceUrls
+      );
       if (src) {
-        const clean = src.split('?')[0];
-        if (clean && !ad.videos.includes(clean)) ad.videos.push(clean);
+        if (!ad.videos.includes(src)) ad.videos.push(src);
       }
       if (vid.poster && ad.images.length < 3) {
-        const clean = vid.poster.split('?')[0];
-        if (clean && !ad.images.includes(clean)) ad.images.push(clean);
+        const poster = firstUsableMediaUrl(vid.poster, vid.getAttribute('poster'));
+        if (poster && !ad.images.includes(poster)) ad.images.push(poster);
       }
     }
 
     return ad;
+  }
+
+  function firstUsableMediaUrl(...sources) {
+    for (const source of sources) {
+      const url = String(source || '').trim();
+      if (!url) continue;
+      if (url.startsWith('blob:')) continue;
+      if (url.startsWith('data:')) continue;
+      if (!/^https?:\/\//i.test(url)) continue;
+      return url;
+    }
+    return '';
   }
 
   // ── Collect and save ad to storage ────────────────────────────────────────────
@@ -334,14 +354,26 @@
 
       const existing = Array.isArray(r.savedAds) ? r.savedAds : [];
 
-      const exists = ad.libraryCode
-        ? existing.some(e => e.libraryCode === ad.libraryCode)
-        : existing.some(e =>
+      const existingIndex = ad.libraryCode
+        ? existing.findIndex(e => e.libraryCode === ad.libraryCode)
+        : existing.findIndex(e =>
             e.shopifyUrl === ad.shopifyUrl &&
-            e.adText === ad.adText &&
-            JSON.stringify(e.images || []) === JSON.stringify(ad.images || [])
+            e.adText === ad.adText
           );
-      if (exists) { log('Already in storage'); return; }
+      if (existingIndex >= 0) {
+        const merged = mergeSavedAd(existing[existingIndex], ad);
+        if (JSON.stringify(merged) === JSON.stringify(existing[existingIndex])) {
+          log('Already in storage');
+          return;
+        }
+        existing[existingIndex] = merged;
+        chrome.storage.local.set({ savedAds: existing }, () => {
+          if (chrome.runtime.lastError) { log('Update err:', chrome.runtime.lastError.message); return; }
+          log('Updated media for saved ad:', merged.libraryCode || merged.shopifyUrl);
+          notify({ type: 'AD_COLLECTED', total: existing.length });
+        });
+        return;
+      }
 
       // Rolling cap at 500 ads
       if (existing.length >= 500) existing.splice(0, existing.length - 499);
@@ -361,6 +393,34 @@
         notify({ type: 'AD_COLLECTED', total: existing.length });
       });
     });
+  }
+
+  function mergeSavedAd(current, next) {
+    return {
+      ...current,
+      shopifyUrl: next.shopifyUrl || current.shopifyUrl,
+      advertiserName: next.advertiserName || current.advertiserName,
+      advertiserLogo: next.advertiserLogo || current.advertiserLogo,
+      adText: next.adText || current.adText,
+      images: mergeMediaUrls(current.images, next.images, 3),
+      videos: mergeMediaUrls(current.videos, next.videos, 2),
+      scrapedAt: next.scrapedAt || current.scrapedAt,
+    };
+  }
+
+  function mergeMediaUrls(currentList, nextList, limit) {
+    const urls = [];
+    const seen = new Set();
+    for (const raw of [...(nextList || []), ...(currentList || [])]) {
+      const url = firstUsableMediaUrl(raw);
+      if (!url) continue;
+      const key = url.split('?')[0];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      urls.push(url);
+      if (urls.length >= limit) break;
+    }
+    return urls;
   }
 
   // ── Card styling ───────────────────────────────────────────────────────────────

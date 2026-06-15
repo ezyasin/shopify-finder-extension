@@ -4,6 +4,16 @@ let allAds      = [];
 let filteredAds = [];
 let storeCount  = 0;
 
+function mediaUrls(list) {
+  return Array.isArray(list)
+    ? list.map(url => String(url || '').trim()).filter(isUsableMediaUrl)
+    : [];
+}
+
+function isUsableMediaUrl(url) {
+  return /^https?:\/\//i.test(url) || /^data:/i.test(url);
+}
+
 // ── Storage loading ────────────────────────────────────────────────────────────
 // Use BOTH storage.onChanged (instant) AND polling (safety net).
 // DO NOT use chrome.runtime.onMessage — it does not work reliably in tab pages.
@@ -65,13 +75,13 @@ function applyFilters() {
       (a.shopifyUrl     || '').toLowerCase().includes(q)
     );
   }
-  if (media === 'images')  ads = ads.filter(a => (a.images  || []).length > 0);
-  if (media === 'videos')  ads = ads.filter(a => (a.videos  || []).length > 0);
-  if (media === 'nomedia') ads = ads.filter(a => !(a.images || []).length && !(a.videos || []).length);
+  if (media === 'images')  ads = ads.filter(a => mediaUrls(a.images).length > 0);
+  if (media === 'videos')  ads = ads.filter(a => mediaUrls(a.videos).length > 0);
+  if (media === 'nomedia') ads = ads.filter(a => !mediaUrls(a.images).length && !mediaUrls(a.videos).length);
   if (sort === 'newest') ads.sort((a,b) => new Date(b.scrapedAt||0) - new Date(a.scrapedAt||0));
   if (sort === 'oldest') ads.sort((a,b) => new Date(a.scrapedAt||0) - new Date(b.scrapedAt||0));
   if (sort === 'name')   ads.sort((a,b) => (a.advertiserName||'').localeCompare(b.advertiserName||''));
-  if (sort === 'media')  ads.sort((a,b) => ((b.images||[]).length+(b.videos||[]).length) - ((a.images||[]).length+(a.videos||[]).length));
+  if (sort === 'media')  ads.sort((a,b) => (mediaUrls(b.images).length+mediaUrls(b.videos).length) - (mediaUrls(a.images).length+mediaUrls(a.videos).length));
 
   filteredAds = ads;
   render();
@@ -117,7 +127,21 @@ function render() {
       video.pause();
       video.currentTime = 0;
     });
+    video.addEventListener('error', () => showPreviewError(video, 'Video URL expired'));
   });
+  grid.querySelectorAll('img[data-media-preview]').forEach(img => {
+    img.addEventListener('error', () => showPreviewError(img, 'Image URL expired'));
+  });
+}
+
+function showPreviewError(media, message) {
+  const wrap = media.closest('.ad-media');
+  if (!wrap || wrap.querySelector('.media-error')) return;
+  media.remove();
+  const error = document.createElement('div');
+  error.className = 'media-error';
+  error.textContent = message;
+  wrap.insertBefore(error, wrap.firstChild);
 }
 
 function buildCard(ad, i) {
@@ -127,19 +151,21 @@ function buildCard(ad, i) {
     return '';
   }
   const domain  = (ad.shopifyUrl||'').replace(/^https?:\/\/(www\.)?/,'').split('/')[0];
-  const hasImg  = (ad.images||[]).length > 0;
-  const hasVid  = (ad.videos||[]).length > 0;
+  const images  = mediaUrls(ad.images);
+  const videos  = mediaUrls(ad.videos);
+  const hasImg  = images.length > 0;
+  const hasVid  = videos.length > 0;
   const initial = ((ad.advertiserName||'?')[0]||'?').toUpperCase();
 
   let mediaTpl = `<div class="no-media"><span>🖼</span><span>NO MEDIA</span></div>`;
   if (hasVid) {
-    mediaTpl = `<video src="${esc(ad.videos[0])}" muted playsinline preload="metadata" data-hover-preview
-                  poster="${hasImg ? esc(ad.images[0]) : ''}"></video>
+    mediaTpl = `<video src="${esc(videos[0])}" muted playsinline preload="metadata" data-hover-preview
+                  poster="${hasImg ? esc(images[0]) : ''}"></video>
                 <span class="vid-badge">▶ VIDEO</span>
-                ${ad.videos.length > 1 ? `<span class="cnt-badge">+${ad.videos.length-1} more</span>` : ''}`;
+                ${videos.length > 1 ? `<span class="cnt-badge">+${videos.length-1} more</span>` : ''}`;
   } else if (hasImg) {
-    mediaTpl = `<img src="${esc(ad.images[0])}" alt="Ad" loading="lazy"/>
-                ${ad.images.length > 1 ? `<span class="cnt-badge">${ad.images.length} imgs</span>` : ''}`;
+    mediaTpl = `<img src="${esc(images[0])}" alt="Ad" loading="lazy" data-media-preview/>
+                ${images.length > 1 ? `<span class="cnt-badge">${images.length} imgs</span>` : ''}`;
   }
 
   const avatarTpl = ad.advertiserLogo
@@ -175,21 +201,25 @@ function openModal(ad) {
   while (body.firstChild) body.removeChild(body.firstChild);
 
   // Media
-  const hasImg = (ad.images||[]).length > 0;
-  const hasVid = (ad.videos||[]).length > 0;
+  const images = mediaUrls(ad.images);
+  const videos = mediaUrls(ad.videos);
+  const hasImg = images.length > 0;
+  const hasVid = videos.length > 0;
   if (hasImg || hasVid) {
     const mg = document.createElement('div');
     mg.className = 'media-grid';
-    (ad.videos||[]).forEach(src => {
+    videos.forEach((src, index) => {
       const item = document.createElement('div'); item.className = 'media-item';
       const v = document.createElement('video'); v.src=src; v.controls=true; v.muted=true; v.playsInline=true; v.style.cssText='width:100%;height:100%;object-fit:cover';
-      const dl = document.createElement('a'); dl.href=src; dl.target='_blank'; dl.rel='noopener'; dl.textContent='⬇ DL'; dl.className='media-dl';
+      v.addEventListener('error', () => showModalMediaError(item, 'Video URL expired'));
+      const dl = makeMediaDownloadButton(src, 'video', ad, index);
       item.appendChild(v); item.appendChild(dl); mg.appendChild(item);
     });
-    (ad.images||[]).forEach(src => {
+    images.forEach((src, index) => {
       const item = document.createElement('div'); item.className = 'media-item';
       const img = document.createElement('img'); img.src=src; img.alt='Ad media'; img.loading='lazy';
-      const dl = document.createElement('a'); dl.href=src; dl.target='_blank'; dl.rel='noopener'; dl.textContent='⬇ DL'; dl.className='media-dl';
+      img.addEventListener('error', () => showModalMediaError(item, 'Image URL expired'));
+      const dl = makeMediaDownloadButton(src, 'image', ad, index);
       item.appendChild(img); item.appendChild(dl); mg.appendChild(item);
     });
     body.appendChild(mg);
@@ -205,8 +235,8 @@ function openModal(ad) {
     <div class="info-item"><div class="info-lbl">Library Code</div><div class="info-val">${esc(ad.libraryCode||'—')}</div></div>
     <div class="info-item"><div class="info-lbl">Domain</div><div class="info-val">${esc(domain)}</div></div>
     <div class="info-item"><div class="info-lbl">Saved At</div><div class="info-val">${ad.scrapedAt ? new Date(ad.scrapedAt).toLocaleString() : '—'}</div></div>
-    <div class="info-item"><div class="info-lbl">Images</div><div class="info-val">${(ad.images||[]).length}</div></div>
-    <div class="info-item"><div class="info-lbl">Videos</div><div class="info-val">${(ad.videos||[]).length}</div></div>
+    <div class="info-item"><div class="info-lbl">Images</div><div class="info-val">${images.length}</div></div>
+    <div class="info-item"><div class="info-lbl">Videos</div><div class="info-val">${videos.length}</div></div>
   </div>`;
   body.appendChild(s2);
 
@@ -220,6 +250,62 @@ function openModal(ad) {
 }
 
 function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className=cls; return e; }
+
+function makeMediaDownloadButton(src, kind, ad, index) {
+  const button = el('button', 'media-dl');
+  button.type = 'button';
+  button.textContent = '⬇ DL';
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    downloadMedia(src, kind, ad, index);
+  });
+  return button;
+}
+
+function showModalMediaError(item, message) {
+  if (item.querySelector('.media-error')) return;
+  const error = el('div', 'media-error');
+  error.textContent = message;
+  item.appendChild(error);
+}
+
+function downloadMedia(src, kind, ad, index) {
+  if (!isUsableMediaUrl(src)) {
+    toast('Media URL is temporary. Rescan to refresh it.');
+    return;
+  }
+  const filename = buildMediaFilename(src, kind, ad, index);
+  chrome.downloads.download({ url: src, filename, saveAs: true }, () => {
+    if (chrome.runtime.lastError) {
+      toast(`Download failed: ${chrome.runtime.lastError.message}`);
+      return;
+    }
+    toast('Download started');
+  });
+}
+
+function buildMediaFilename(src, kind, ad, index) {
+  const domain = (ad.shopifyUrl || '').replace(/^https?:\/\/(www\.)?/, '').split('/')[0];
+  const base = sanitizeFilePart(ad.advertiserName || domain || 'shopify-ad');
+  return `shopify-finder/${base}-${kind}-${index + 1}${mediaExtension(src, kind)}`;
+}
+
+function sanitizeFilePart(value) {
+  return String(value || 'media')
+    .normalize('NFKD')
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'media';
+}
+
+function mediaExtension(src, kind) {
+  try {
+    const pathname = new URL(src).pathname;
+    const match = pathname.match(/\.(jpe?g|png|webp|gif|mp4|mov|webm)$/i);
+    if (match) return `.${match[1].toLowerCase()}`;
+  } catch (_) {}
+  return kind === 'video' ? '.mp4' : '.jpg';
+}
 
 document.getElementById('modal-close').addEventListener('click', () => document.getElementById('overlay').classList.remove('open'));
 document.getElementById('overlay').addEventListener('click', e => { if (e.target===e.currentTarget) e.currentTarget.classList.remove('open'); });
